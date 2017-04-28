@@ -20,6 +20,12 @@ local cmd = torch.CmdLine()
 cmd:option('-models', 'models/models/instance_norm/candy.t7')
 cmd:option('-height', 480)
 cmd:option('-width', 640)
+cmd:option('-cycle', 0)
+
+-- Saliency options
+cmd:option('-saliency', false, 'if true shows deep gaze predictions instead of stylisation')
+cmd:option('-density', false, 'if true the density instead of log-density is displayed')
+cmd:option('-imgvis', false, 'if true the saliency map is multiplied with the input image in the output')
 
 -- GPU options
 cmd:option('-gpu', -1)
@@ -36,14 +42,25 @@ cmd:option('-alpha_out', 0.1, 'smoothing parameter for output frames')
 local function main()
   local opt = cmd:parse(arg)
 
+  if opt.saliency then
+    paths.dofile('Misc.lua') -- for LogSoftMax in deepgaze
+    opt.models = 'models/models/DeepGaze.t7'
+  end
+
   local dtype, use_cudnn = utils.setup_gpu(opt.gpu, opt.backend, opt.use_cudnn == 1)
   local models = {}
 
   local preprocess_method = nil
   for _, checkpoint_path in ipairs(opt.models:split(',')) do
     print('loading model from ', checkpoint_path)
-    local checkpoint = torch.load(checkpoint_path)
-    local model = checkpoint.model
+    local model = nil
+    local checkpoint = nil
+    if opt.saliency then 
+      model = torch.load(checkpoint_path)
+    else
+      checkpoint = torch.load(checkpoint_path)
+      model = checkpoint.model
+    end
     -- insert bilinear upsampling into the model
     local upsamp = nn.SpatialUpSamplingBilinear(2)
     model:insert(upsamp, 1)
@@ -54,7 +71,12 @@ local function main()
       cudnn.convert(model, cudnn)
     end
     table.insert(models, model)
-    local this_preprocess_method = checkpoint.opt.preprocessing or 'vgg'
+    local this_preprocess_method = nil
+    if opt.saliency then
+      this_preprocess_method = 'vgg'
+    else
+      this_preprocess_method = checkpoint.opt.preprocessing or 'vgg'
+    end
     if not preprocess_method then
       print('got here')
       preprocess_method = this_preprocess_method
@@ -79,6 +101,7 @@ local function main()
   local win = nil
   local img_pre = nil
   local imgs_out = {}
+  start = os.time()
   while true do
     -- Grab a frame from the webcam
     local img = cam:forward()
@@ -93,16 +116,41 @@ local function main()
       img_pre = preprocess.preprocess(img):type(dtype)
     end
 
+    if opt.cycle == 1 then
+      index = math.floor((os.time() - start) / 30) % 3 + 1
+      models2 = {}
+      table.insert(models2, models[index])
+    else
+      models2 = models
+    end
+
     -- Run the models
-    for i, model in ipairs(models) do
+    for i, model in ipairs(models2) do
       --local timer22 = torch.Timer() --Jonas
       local img_out_pre = model:forward(img_pre)
       --if cutorch then cutorch.synchronize() end --Jonas
       --print(timer22:time().real) --Jonas
 
       -- Deprocess the frame and show the image
+      img_out = nil
+      if opt.saliency then
+        img_out = img_out_pre:float()
+	if opt.density then
+	  img_out = torch.exp(img_out)
+	end
+	img_out:add(-img_out:min())
+	img_out:div(img_out:max())
+	-- img_out:mul(2)
+	-- img_out[img_out:ge(1)] = 1
+	if opt.imgvis then
+	  img_out = torch.cmul(img:float(), img_out:expandAs(img))[1]
+	else
+	  img_out = img_out[1]
+	end
+      else
+        img_out = preprocess.deprocess(img_out_pre)[1]:float()
+      end
       local alpha_out = opt.alpha_out
-      local img_out = preprocess.deprocess(img_out_pre)[1]:float()
       if imgs_out[i] then
         imgs_out[i] = (alpha_out * imgs_out[i] + (1-alpha_out) * img_out)
       else
