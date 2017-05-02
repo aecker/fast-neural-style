@@ -21,11 +21,13 @@ cmd:option('-models', 'models/models/instance_norm/candy.t7')
 cmd:option('-height', 480)
 cmd:option('-width', 640)
 cmd:option('-cycle', 0)
+cmd:option('-cycle_time', 15)
 
 -- Saliency options
 cmd:option('-saliency', false, 'if true shows deep gaze predictions instead of stylisation')
 cmd:option('-density', false, 'if true the density instead of log-density is displayed')
 cmd:option('-imgvis', false, 'if true the saliency map is multiplied with the input image in the output')
+cmd:option('-gamma', 1)
 
 -- GPU options
 cmd:option('-gpu', -1)
@@ -101,7 +103,15 @@ local function main()
   local win = nil
   local img_pre = nil
   local imgs_out = {}
-  start = os.time()
+  local start = os.time()
+  local index = 1
+  local models2 = {}
+  local num_models = #models
+  if opt.cycle == 1 then
+    table.insert(models2, models[index]:clone())
+  else
+    models2 = models
+  end
   while true do
     -- Grab a frame from the webcam
     local img = cam:forward()
@@ -117,11 +127,12 @@ local function main()
     end
 
     if opt.cycle == 1 then
-      index = math.floor((os.time() - start) / 30) % 3 + 1
-      models2 = {}
-      table.insert(models2, models[index])
-    else
-      models2 = models
+      if (os.time() - start) > opt.cycle_time then
+        index = index % num_models + 1
+        models2 = {}
+        table.insert(models2, models[index]:clone())
+        start = os.time()
+      end
     end
 
     -- Run the models
@@ -143,7 +154,9 @@ local function main()
 	-- img_out:mul(2)
 	-- img_out[img_out:ge(1)] = 1
 	if opt.imgvis then
-	  img_out = torch.cmul(img:float(), img_out:expandAs(img))[1]
+	  -- img_out = torch.cmul(img:float(), img_out:expandAs(img))[1]
+	  img_out = torch.cmul(img:float() - 0.5, torch.pow(img_out:expandAs(img), opt.gamma))[1] + 0.5
+	  -- img_out = torch.cmul(torch.sqrt(img:float()), img_out:expandAs(img))[1]
 	else
 	  img_out = img_out[1]
 	end
